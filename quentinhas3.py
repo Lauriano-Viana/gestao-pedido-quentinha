@@ -6,6 +6,7 @@ from datetime import datetime
 import uuid
 import urllib.parse
 import locale
+import time # <<< ALTERAÇÃO INSERIDA: Importamos a biblioteca time
 
 # Configurações iniciais do Streamlit
 st.set_page_config(page_title="Pedido Quentinhas - Congresso RCC/PI", page_icon="🍲", layout="wide")
@@ -77,9 +78,31 @@ def extrair_data_do_datetime(data_hora_str):
     except:
         return None
     
+# <<< ALTERAÇÃO INSERIDA: Toda a função 'pagina_pedidos' foi reestruturada
 def pagina_pedidos():
     st.title("🍲 Agende seu Pedido de Quentinha")
 
+    # Inicializa o estado da sessão para controlar o fluxo da página
+    if 'pedido_finalizado' not in st.session_state:
+        st.session_state.pedido_finalizado = False
+
+    # Se o pedido foi finalizado, mostra a mensagem de sucesso e o botão para novo pedido
+    if st.session_state.pedido_finalizado:
+        st.success(
+            "Pedido(s) registrado(s) com sucesso!"
+            "\n\nVocê receberá uma confirmação via WhatsApp após aprovação."
+        )
+        st.balloons() # Adiciona uma animação para comemorar!
+        
+        if st.button("➕ Fazer um Novo Pedido"):
+            # Limpa o estado e reinicia a página
+            st.session_state.pedido_finalizado = False
+            if 'carrinho' in st.session_state:
+                del st.session_state.carrinho
+            st.rerun()
+        return # Impede que o resto do código da página seja executado
+
+    # Lógica normal da página de pedidos
     try:
         locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
     except locale.Error:
@@ -95,13 +118,6 @@ def pagina_pedidos():
 
     if 'carrinho' not in st.session_state:
         st.session_state.carrinho = {data_valor: {opcao: 0 for opcao in CARDAPIO["opcoes_principais"]} for data_valor in DATAS_EXIBICAO.values()}
-
-    # <<< ALTERAÇÃO INSERIDA
-    # Inicializa o estado do botão de submissão, se ele não existir.
-    # Isso é crucial para controlar se o botão deve estar ativo ou inativo.
-    if 'submit_disabled' not in st.session_state:
-        st.session_state.submit_disabled = False
-    # <<< ALTERAÇÃO FINALIZADA
 
     st.subheader("1. Para quais dias você quer agendar?")
     escolhas_datas = {
@@ -170,46 +186,29 @@ def pagina_pedidos():
             nome_cliente = st.text_input("Seu Nome Completo*")
             telefone_cliente = st.text_input("Seu Telefone/WhatsApp com DDD*", placeholder="Ex: 86999998888")
             observacoes = st.text_area("Observações")
-
-            # <<< ALTERAÇÃO INSERIDA
-            # O botão agora usa o estado 'submit_disabled' para se auto-desativar.
-            submitted = st.form_submit_button("✔ Finalizar Pedido", disabled=st.session_state.submit_disabled)
-            # <<< ALTERAÇÃO FINALIZADA
+            submitted = st.form_submit_button("✔ Finalizar Pedido")
 
             if submitted:
                 if not nome_cliente or not telefone_cliente:
                     st.warning("Por favor, preencha Nome e Telefone.")
                 else:
-                    # <<< ALTERAÇÃO INSERIDA
-                    # Ao submeter, desativa imediatamente o botão para prevenir cliques duplos.
-                    st.session_state.submit_disabled = True
-                    # <<< ALTERAÇÃO FINALIZADA
+                    with st.spinner('Registrando seu pedido, por favor aguarde...'):
+                        for data_pedido, detalhes in pedidos_finais.items():
+                            id_por_data = f"{data_pedido.replace('-', '')}-{uuid.uuid4().hex[:6].upper()}"
+                            itens_fmt = ", ".join([f"[{item['qtd']}x] {item['nome']}" for item in detalhes["itens_obj"]])
+                            new_order_data = [
+                                id_por_data, f"{data_pedido} {datetime.now().strftime('%H:%M:%S')}",
+                                nome_cliente, "", telefone_cliente, "",
+                                itens_fmt, f"{detalhes['total']:.2f}",
+                                observacoes, tipo_pagamento, "", "Pendente", "",
+                                f"{grand_total:.2f}", ""
+                            ]
+                            sheet.append_row(new_order_data, value_input_option='USER_ENTERED')
                     
-                    for data_pedido, detalhes in pedidos_finais.items():
-                        id_por_data = f"{data_pedido.replace('-', '')}-{uuid.uuid4().hex[:6].upper()}"
-                        itens_fmt = ", ".join([f"[{item['qtd']}x] {item['nome']}" for item in detalhes["itens_obj"]])
-                        new_order_data = [
-                            id_por_data, f"{data_pedido} {datetime.now().strftime('%H:%M:%S')}",
-                            nome_cliente, "", telefone_cliente, "",
-                            itens_fmt, f"{detalhes['total']:.2f}",
-                            observacoes, tipo_pagamento, "", "Pendente", "",
-                            f"{grand_total:.2f}", ""
-                        ]
-                        sheet.append_row(new_order_data, value_input_option='USER_ENTERED')
-                    
-                    st.success(
-                        "Pedido(s) registrado(s) com sucesso!"
-                        "\n\n Você receberá uma confirmação via WhatsApp após aprovação. \n\n"
-                    )
-                    
-                    del st.session_state.carrinho
-
-                    # <<< ALTERAÇÃO INSERIDA
-                    # Reativa o botão para a próxima sessão/pedido.
-                    st.session_state.submit_disabled = False
-                    # Força a página a reiniciar do zero, limpando o formulário.
+                    # Define o estado como finalizado e reinicia o script para mostrar a tela de sucesso
+                    st.session_state.pedido_finalizado = True
                     st.rerun()
-                    # <<< ALTERAÇÃO FINALIZADA
+# <<< ALTERAÇÃO FINALIZADA
 
 def pagina_admin():
     if not st.session_state.get("autenticado"):
@@ -411,6 +410,7 @@ def pagina_admin():
             for metodo, count in total_por_pagamento.items():
                 st.write(f"- {metodo}: {count} pedido(s)")
 
+# Configuração do menu principal
 menu = st.sidebar.radio("Escolha a página:", ["Fazer Pedido", "Painel de Administração"])
 if menu == "Fazer Pedido":
     pagina_pedidos()
