@@ -68,50 +68,42 @@ def notificar_cliente(pedido_id, nome_cliente, telefone_cliente):
 def extrair_data_do_datetime(data_hora_str):
     """Extrai a data de uma string de data/hora"""
     try:
-        # Tenta diferentes formatos de data
         if ' ' in str(data_hora_str):
             data_parte = str(data_hora_str).split(' ')[0]
         else:
             data_parte = str(data_hora_str)
         
-        # Converte para datetime e depois para date
         return pd.to_datetime(data_parte).date()
     except:
         return None
     
-    #########################
-
 def pagina_pedidos():
     st.title("🍲 Agende seu Pedido de Quentinha")
 
-    # --- INÍCIO DA CORREÇÃO ---
-    # Define a localidade para português para garantir que os dias da semana fiquem corretos
     try:
         locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
     except locale.Error:
-        # Fallback para o caso de o sistema não ter a localidade pt_BR
         locale.setlocale(locale.LC_TIME, '')
 
-    # Cria um novo dicionário de exibição com as datas formatadas corretamente
-    # Isso garante que sempre usaremos o formato DD/MM/YYYY
     DATAS_EXIBICAO = {}
     for nome_original, valor_data in DATAS_DISPONIVEIS.items():
         data_obj = datetime.strptime(valor_data, '%Y-%m-%d')
-        # Pega o dia da semana ("Sábado", "Domingo", etc.) do nome da chave original
         dia_semana = nome_original.split(' ')[0]
-        # Formata a data para o padrão DD/MM/YYYY
         data_formatada = data_obj.strftime('%d/%m/%Y')
-        # Cria o texto final para exibição
         texto_final_exibicao = f"{dia_semana} ({data_formatada})"
         DATAS_EXIBICAO[texto_final_exibicao] = valor_data
-
-    # --- FIM DA CORREÇÃO ---
 
     if 'carrinho' not in st.session_state:
         st.session_state.carrinho = {data_valor: {opcao: 0 for opcao in CARDAPIO["opcoes_principais"]} for data_valor in DATAS_EXIBICAO.values()}
 
+    # <<< ALTERAÇÃO INSERIDA
+    # Inicializa o estado do botão de submissão, se ele não existir.
+    # Isso é crucial para controlar se o botão deve estar ativo ou inativo.
+    if 'submit_disabled' not in st.session_state:
+        st.session_state.submit_disabled = False
+    # <<< ALTERAÇÃO FINALIZADA
+
     st.subheader("1. Para quais dias você quer agendar?")
-    # Agora usamos o novo dicionário DATAS_EXIBICAO para mostrar as opções
     escolhas_datas = {
         valor_data: st.radio(
             f"Pedido para **{nome_data_formatado}**:",
@@ -132,7 +124,6 @@ def pagina_pedidos():
     st.info("**Atenção:** Todas as opções acompanham Baião de dois, Macarrão, Farofa e Salada cozida.")
 
     for data_pedido in datas_para_pedir:
-        # Encontra o nome amigável formatado no nosso novo dicionário
         nome_amigavel_data = [nome for nome, valor in DATAS_EXIBICAO.items() if valor == data_pedido][0]
         st.markdown("---")
         st.subheader(f"🛒 Pedido para: {nome_amigavel_data}")
@@ -179,12 +170,21 @@ def pagina_pedidos():
             nome_cliente = st.text_input("Seu Nome Completo*")
             telefone_cliente = st.text_input("Seu Telefone/WhatsApp com DDD*", placeholder="Ex: 86999998888")
             observacoes = st.text_area("Observações")
-            submitted = st.form_submit_button("✔ Finalizar Pedido")
+
+            # <<< ALTERAÇÃO INSERIDA
+            # O botão agora usa o estado 'submit_disabled' para se auto-desativar.
+            submitted = st.form_submit_button("✔ Finalizar Pedido", disabled=st.session_state.submit_disabled)
+            # <<< ALTERAÇÃO FINALIZADA
 
             if submitted:
                 if not nome_cliente or not telefone_cliente:
                     st.warning("Por favor, preencha Nome e Telefone.")
                 else:
+                    # <<< ALTERAÇÃO INSERIDA
+                    # Ao submeter, desativa imediatamente o botão para prevenir cliques duplos.
+                    st.session_state.submit_disabled = True
+                    # <<< ALTERAÇÃO FINALIZADA
+                    
                     for data_pedido, detalhes in pedidos_finais.items():
                         id_por_data = f"{data_pedido.replace('-', '')}-{uuid.uuid4().hex[:6].upper()}"
                         itens_fmt = ", ".join([f"[{item['qtd']}x] {item['nome']}" for item in detalhes["itens_obj"]])
@@ -196,13 +196,21 @@ def pagina_pedidos():
                             f"{grand_total:.2f}", ""
                         ]
                         sheet.append_row(new_order_data, value_input_option='USER_ENTERED')
+                    
                     st.success(
                         "Pedido(s) registrado(s) com sucesso!"
                         "\n\n Você receberá uma confirmação via WhatsApp após aprovação. \n\n"
                     )
+                    
                     del st.session_state.carrinho
 
-###########
+                    # <<< ALTERAÇÃO INSERIDA
+                    # Reativa o botão para a próxima sessão/pedido.
+                    st.session_state.submit_disabled = False
+                    # Força a página a reiniciar do zero, limpando o formulário.
+                    st.rerun()
+                    # <<< ALTERAÇÃO FINALIZADA
+
 def pagina_admin():
     if not st.session_state.get("autenticado"):
         autenticar_admin()
@@ -210,11 +218,8 @@ def pagina_admin():
 
     tab1, tab2 = st.tabs(["Gerenciar Pedidos", "Relatórios"])
 
-    # Carrega todos os dados e converte a coluna de data/hora para o tipo datetime
     all_data = sheet.get_all_records()
     if not all_data:
-        st.info("Nenhum pedido encontrado na planilha.")
-        # Adicionado para evitar erro se a planilha estiver vazia em ambas as abas
         with tab1:
             st.title("👑 Gerenciamento de Pedidos Pendentes")
             st.info("Nenhum pedido para gerenciar.")
@@ -224,8 +229,6 @@ def pagina_admin():
         return
 
     df = pd.DataFrame(all_data)
-    # <-- ALTERAÇÃO 1: Converte a coluna inteira para datetime de uma vez.
-    # Isso garante que o Python, e não o Google Sheets, controle o formato.
     df['Data/Hora'] = pd.to_datetime(df['Data/Hora'], errors='coerce')
 
     with tab1:
@@ -262,7 +265,6 @@ def pagina_admin():
             st.markdown(f"**Pedidos pendentes encontrados:** {len(df_pendentes)}")
             for _, row in df_pendentes.iterrows():
                 with st.expander(f"Pedido #{row['ID']} - {row['Nome Cliente']} - R$ {row['Total Pedido']}"):
-                    # <-- ALTERAÇÃO 2: Formata a data para o padrão BR antes de exibir
                     data_formatada = row['Data/Hora'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(row['Data/Hora']) else "Data inválida"
                     st.write(f"**Data/Hora:** {data_formatada}")
                     st.write(f"**Itens:** {row['Itens Pedido']}")
@@ -309,7 +311,6 @@ def pagina_admin():
         
         st.info("Por padrão, a data de hoje é selecionada. Altere para a data que deseja consultar (ex: 02/08/2025 ou 03/08/2025).")
 
-        # <-- ALTERAÇÃO 3: Simplificamos a criação da coluna 'Data', pois 'Data/Hora' já é um datetime.
         df['Data'] = df['Data/Hora'].dt.date
         df.dropna(subset=['Data'], inplace=True)
         df['Total Pedido'] = pd.to_numeric(df['Total Pedido'], errors='coerce').fillna(0)
@@ -357,7 +358,6 @@ def pagina_admin():
                 with st.expander(f"Pedido #{row['ID']} - {row['Nome Cliente']}"):
                     col1, col2 = st.columns([3, 1])
                     with col1:
-                        # <-- ALTERAÇÃO 4: Formata a data aqui também para consistência
                         data_formatada = row['Data/Hora'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(row['Data/Hora']) else "Data inválida"
                         st.write(f"**Data/Hora:** {data_formatada}")
                         st.write(f"**Itens:** {row['Itens Pedido']}")
@@ -411,7 +411,6 @@ def pagina_admin():
             for metodo, count in total_por_pagamento.items():
                 st.write(f"- {metodo}: {count} pedido(s)")
 
-# Configuração do menu principal
 menu = st.sidebar.radio("Escolha a página:", ["Fazer Pedido", "Painel de Administração"])
 if menu == "Fazer Pedido":
     pagina_pedidos()
