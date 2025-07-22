@@ -6,10 +6,18 @@ from datetime import datetime
 import uuid
 import urllib.parse
 import locale
-import time # <<< ALTERAÇÃO INSERIDA: Importamos a biblioteca time
+import time
 
 # Configurações iniciais do Streamlit
 st.set_page_config(page_title="Pedido Quentinhas - Congresso RCC/PI", page_icon="🍲", layout="wide")
+
+# <<< ALTERAÇÃO INSERIDA: Definindo a localidade no início para garantir que esteja disponível em todo o script
+try:
+    locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
+except locale.Error:
+    # Fallback para o caso de o sistema não ter a localidade pt_BR
+    locale.setlocale(locale.LC_TIME, '')
+# <<< ALTERAÇÃO FINALIZADA
 
 @st.cache_resource
 def connect_and_authorize():
@@ -54,17 +62,37 @@ def gerar_link_whatsapp(telefone, mensagem):
         telefone = '55' + telefone
     return f"https://wa.me/{telefone}?text={urllib.parse.quote(mensagem)}"
 
-def notificar_cliente(pedido_id, nome_cliente, telefone_cliente):
-    """Função para gerar e exibir o link de notificação do WhatsApp"""
-    mensagem = f"Olá, {nome_cliente}! Seu pedido *#{pedido_id}* foi APROVADO!"
+# <<< ALTERAÇÃO INSERIDA: A função agora aceita mais parâmetros para a comanda
+def notificar_cliente(pedido_id, nome_cliente, telefone_cliente, data_pedido, itens_pedido):
+    """Função para gerar e exibir o link de notificação do WhatsApp com a comanda simplificada"""
+    
+    # Formata a data para o padrão "DIA DA SEMANA, DD/MM"
+    data_formatada = data_pedido.strftime('%A, %d/%m').upper()
+    
+    # Formata a lista de itens para aparecer um por linha
+    itens_formatados = "- " + itens_pedido.replace(", ", "\n- ")
+
+    # Monta a mensagem usando o Modelo 2 (Comanda Simplificada)
+    mensagem = (
+        f"*Congresso RCC Piauí - Comprovante de Quentinha* 🍲\n\n"
+        f"Olá, {nome_cliente}!\n"
+        f"Seu pedido foi APROVADO!\n\n"
+        f"*Nº do Pedido:* #{pedido_id}\n"
+        f"*Data:* {data_formatada}\n"
+        f"*Itens:*\n{itens_formatados}\n\n"
+        f"Apresente esta mensagem no local de retirada. Bom apetite!"
+    )
+    
     link_whatsapp = gerar_link_whatsapp(telefone_cliente, mensagem)
     
     st.markdown("### Notificação ao Cliente")
-    st.markdown(f"**Mensagem pronta:** `{mensagem}`")
+    st.markdown(f"**Mensagem pronta:**")
+    st.text_area("Preview da Mensagem", value=mensagem, height=250, disabled=True)
     st.markdown(f"[👉 Clique aqui para enviar mensagem no WhatsApp]({link_whatsapp})", unsafe_allow_html=True)
     st.markdown(f"**Link completo:** `{link_whatsapp}`")
     
     return link_whatsapp
+# <<< ALTERAÇÃO FINALIZADA
 
 def extrair_data_do_datetime(data_hora_str):
     """Extrai a data de uma string de data/hora"""
@@ -78,35 +106,25 @@ def extrair_data_do_datetime(data_hora_str):
     except:
         return None
     
-# <<< ALTERAÇÃO INSERIDA: Toda a função 'pagina_pedidos' foi reestruturada
 def pagina_pedidos():
     st.title("🍲 Agende seu Pedido de Quentinha")
 
-    # Inicializa o estado da sessão para controlar o fluxo da página
     if 'pedido_finalizado' not in st.session_state:
         st.session_state.pedido_finalizado = False
 
-    # Se o pedido foi finalizado, mostra a mensagem de sucesso e o botão para novo pedido
     if st.session_state.pedido_finalizado:
         st.success(
             "Pedido(s) registrado(s) com sucesso!"
             "\n\nVocê receberá uma confirmação via WhatsApp após aprovação."
         )
-        st.balloons() # Adiciona uma animação para comemorar!
+        st.balloons()
         
         if st.button("➕ Fazer um Novo Pedido"):
-            # Limpa o estado e reinicia a página
             st.session_state.pedido_finalizado = False
             if 'carrinho' in st.session_state:
                 del st.session_state.carrinho
             st.rerun()
-        return # Impede que o resto do código da página seja executado
-
-    # Lógica normal da página de pedidos
-    try:
-        locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
-    except locale.Error:
-        locale.setlocale(locale.LC_TIME, '')
+        return
 
     DATAS_EXIBICAO = {}
     for nome_original, valor_data in DATAS_DISPONIVEIS.items():
@@ -205,10 +223,8 @@ def pagina_pedidos():
                             ]
                             sheet.append_row(new_order_data, value_input_option='USER_ENTERED')
                     
-                    # Define o estado como finalizado e reinicia o script para mostrar a tela de sucesso
                     st.session_state.pedido_finalizado = True
                     st.rerun()
-# <<< ALTERAÇÃO FINALIZADA
 
 def pagina_admin():
     if not st.session_state.get("autenticado"):
@@ -295,11 +311,15 @@ def pagina_admin():
                     
                     if st.session_state.get(f"show_notify_{row['ID']}", False):
                         with st.container(border=True):
+                            # <<< ALTERAÇÃO INSERIDA: Passando os novos dados para a função
                             notificar_cliente(
                                 pedido_id=row['ID'],
                                 nome_cliente=row['Nome Cliente'],
-                                telefone_cliente=row['Telefone Cliente']
+                                telefone_cliente=row['Telefone Cliente'],
+                                data_pedido=row['Data/Hora'],
+                                itens_pedido=row['Itens Pedido']
                             )
+                            # <<< ALTERAÇÃO FINALIZADA
                             if st.button("Ocultar Notificação", key=f"hide_{row['ID']}"):
                                 del st.session_state[f"show_notify_{row['ID']}"]
                                 st.rerun()
