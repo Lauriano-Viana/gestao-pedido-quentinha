@@ -11,13 +11,10 @@ import time
 # Configurações iniciais do Streamlit
 st.set_page_config(page_title="Pedido Quentinhas - Congresso RCC/PI", page_icon="🍲", layout="wide")
 
-# <<< ALTERAÇÃO INSERIDA: Definindo a localidade no início para garantir que esteja disponível em todo o script
 try:
     locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
 except locale.Error:
-    # Fallback para o caso de o sistema não ter a localidade pt_BR
     locale.setlocale(locale.LC_TIME, '')
-# <<< ALTERAÇÃO FINALIZADA
 
 @st.cache_resource
 def connect_and_authorize():
@@ -62,17 +59,12 @@ def gerar_link_whatsapp(telefone, mensagem):
         telefone = '55' + telefone
     return f"https://wa.me/{telefone}?text={urllib.parse.quote(mensagem)}"
 
-# <<< ALTERAÇÃO INSERIDA: A função agora aceita mais parâmetros para a comanda
 def notificar_cliente(pedido_id, nome_cliente, telefone_cliente, data_pedido, itens_pedido):
     """Função para gerar e exibir o link de notificação do WhatsApp com a comanda simplificada"""
     
-    # Formata a data para o padrão "DIA DA SEMANA, DD/MM"
     data_formatada = data_pedido.strftime('%A, %d/%m').upper()
-    
-    # Formata a lista de itens para aparecer um por linha
     itens_formatados = "- " + itens_pedido.replace(", ", "\n- ")
 
-    # Monta a mensagem usando o Modelo 2 (Comanda Simplificada)
     mensagem = (
         f"*Congresso RCC Piauí - Comprovante de Quentinha* 🍲\n\n"
         f"Olá, {nome_cliente}!\n"
@@ -92,7 +84,6 @@ def notificar_cliente(pedido_id, nome_cliente, telefone_cliente, data_pedido, it
     st.markdown(f"**Link completo:** `{link_whatsapp}`")
     
     return link_whatsapp
-# <<< ALTERAÇÃO FINALIZADA
 
 def extrair_data_do_datetime(data_hora_str):
     """Extrai a data de uma string de data/hora"""
@@ -109,6 +100,10 @@ def extrair_data_do_datetime(data_hora_str):
 def pagina_pedidos():
     st.title("🍲 Agende seu Pedido de Quentinha")
 
+    # <<< ALTERAÇÃO INSERIDA: Adiciona a observação sobre o almoço
+    st.info("💡 **Observação:** Todos os pedidos de quentinhas referem-se ao **almoço**.")
+    # <<< ALTERAÇÃO FINALIZADA
+
     if 'pedido_finalizado' not in st.session_state:
         st.session_state.pedido_finalizado = False
 
@@ -119,10 +114,31 @@ def pagina_pedidos():
         )
         st.balloons()
         
+        st.markdown("---")
+        st.subheader("⚠️ Próximo Passo para Aprovar seu Pedido")
+
+        ultimo_pagamento = st.session_state.get('ultimo_pagamento')
+
+        if ultimo_pagamento == "Pix":
+            st.info(
+                "**LEMBRETE IMPORTANTE (PIX):**\n\n"
+                "Para que seu pedido seja APROVADO, você precisa enviar o comprovante de pagamento junto com seu nome completo para o WhatsApp **86-98828-2470**.\n\n"
+                "**Chave PIX:** `86988282470`\n"
+                "**Nome:** Lauriano Costa Viana\n"
+                "**Instituição:** Banco do Brasil"
+            )
+        elif ultimo_pagamento == "Dinheiro":
+            st.warning(
+                "**LEMBRETE IMPORTANTE (DINHEIRO):**\n\n"
+                "Para que seu pedido seja APROVADO, dirija-se ao caixa do evento para efetuar o pagamento."
+            )
+        
         if st.button("➕ Fazer um Novo Pedido"):
             st.session_state.pedido_finalizado = False
             if 'carrinho' in st.session_state:
                 del st.session_state.carrinho
+            if 'ultimo_pagamento' in st.session_state:
+                del st.session_state.ultimo_pagamento
             st.rerun()
         return
 
@@ -202,27 +218,39 @@ def pagina_pedidos():
 
         with st.form("final_form"):
             nome_cliente = st.text_input("Seu Nome Completo*")
-            telefone_cliente = st.text_input("Seu Telefone/WhatsApp com DDD*", placeholder="Ex: 86999998888")
+            telefone_cliente = st.text_input("Seu Celular/WhatsApp com DDD*", placeholder="Ex: 86999998888")
             observacoes = st.text_area("Observações")
             submitted = st.form_submit_button("✔ Finalizar Pedido")
 
             if submitted:
+                # Remove caracteres não numéricos para a validação
+                numeros_telefone = "".join(filter(str.isdigit, telefone_cliente))
+
+                # 1. Verifica se os campos obrigatórios estão preenchidos
                 if not nome_cliente or not telefone_cliente:
-                    st.warning("Por favor, preencha Nome e Telefone.")
+                    st.warning("Por favor, preencha seu Nome Completo e Celular.")
+                
+                # 2. Valida se o telefone tem EXATAMENTE 11 dígitos
+                elif len(numeros_telefone) != 11:
+                    st.warning(f"O número '{telefone_cliente}' parece inválido. Por favor, insira um celular com DDD (11 dígitos). Ex: 86999998888")
+
+                # 3. Se tudo estiver correto, processa o pedido
                 else:
                     with st.spinner('Registrando seu pedido, por favor aguarde...'):
                         for data_pedido, detalhes in pedidos_finais.items():
                             id_por_data = f"{data_pedido.replace('-', '')}-{uuid.uuid4().hex[:6].upper()}"
                             itens_fmt = ", ".join([f"[{item['qtd']}x] {item['nome']}" for item in detalhes["itens_obj"]])
+                            # Usa o número de telefone já limpo para salvar na planilha
                             new_order_data = [
                                 id_por_data, f"{data_pedido} {datetime.now().strftime('%H:%M:%S')}",
-                                nome_cliente, "", telefone_cliente, "",
+                                nome_cliente, "", numeros_telefone, "",
                                 itens_fmt, f"{detalhes['total']:.2f}",
                                 observacoes, tipo_pagamento, "", "Pendente", "",
                                 f"{grand_total:.2f}", ""
                             ]
                             sheet.append_row(new_order_data, value_input_option='USER_ENTERED')
                     
+                    st.session_state.ultimo_pagamento = tipo_pagamento
                     st.session_state.pedido_finalizado = True
                     st.rerun()
 
@@ -272,6 +300,7 @@ def pagina_admin():
         if busca_nome:
             df_pendentes = df_pendentes[df_pendentes['Nome Cliente'].str.contains(busca_nome, case=False, na=False)]
         if busca_telefone:
+            # Garante que a busca por telefone também funcione com números ou strings
             df_pendentes = df_pendentes[df_pendentes['Telefone Cliente'].astype(str).str.contains(busca_telefone, case=False, na=False)]
 
         if df_pendentes.empty:
@@ -311,7 +340,6 @@ def pagina_admin():
                     
                     if st.session_state.get(f"show_notify_{row['ID']}", False):
                         with st.container(border=True):
-                            # <<< ALTERAÇÃO INSERIDA: Passando os novos dados para a função
                             notificar_cliente(
                                 pedido_id=row['ID'],
                                 nome_cliente=row['Nome Cliente'],
@@ -319,7 +347,6 @@ def pagina_admin():
                                 data_pedido=row['Data/Hora'],
                                 itens_pedido=row['Itens Pedido']
                             )
-                            # <<< ALTERAÇÃO FINALIZADA
                             if st.button("Ocultar Notificação", key=f"hide_{row['ID']}"):
                                 del st.session_state[f"show_notify_{row['ID']}"]
                                 st.rerun()
@@ -425,7 +452,7 @@ def pagina_admin():
             for metodo, valor in valores_por_pagamento.items():
                 st.write(f"- {metodo}: R$ {valor:.2f}")
 
-            st.write("##### Número de pedidos por forma de pagamento:")
+            st.write("##### Número de pedidos por forma deagemnto:")
             total_por_pagamento = df_aprovados_do_dia["Tipo Pagamento"].value_counts()
             for metodo, count in total_por_pagamento.items():
                 st.write(f"- {metodo}: {count} pedido(s)")
