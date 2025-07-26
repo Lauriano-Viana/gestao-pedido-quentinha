@@ -2,11 +2,11 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
+from datetime import datetime, date, time
 import uuid
 import urllib.parse
 import locale
-import time
+
 
 # Configurações iniciais do Streamlit
 st.set_page_config(page_title="Pedido Quentinhas - Congresso RCC/PI", page_icon="🍲", layout="wide")
@@ -16,17 +16,49 @@ try:
 except locale.Error:
     locale.setlocale(locale.LC_TIME, '')
 
+# --- Funções de Conexão com Google Sheets ---
+
 @st.cache_resource
 def connect_and_authorize():
+    """Conecta e autoriza o acesso ao Google Sheets."""
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds_dict = st.secrets["google_credentials"]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client_gs = gspread.authorize(creds)
-    spreadsheet = client_gs.open_by_key(st.secrets["GOOGLE_SHEETS_ID"])
-    sheet = spreadsheet.worksheet("Pedidos")
-    return sheet
+    return client_gs
 
-sheet = connect_and_authorize()
+@st.cache_resource
+def get_sheets(_client_gs):
+    """Obtém as planilhas 'Pedidos' e 'Configuracoes'."""
+    spreadsheet = _client_gs.open_by_key(st.secrets["GOOGLE_SHEETS_ID"])
+    
+    # Planilha de Pedidos
+    try:
+        sheet_pedidos = spreadsheet.worksheet("Pedidos")
+    except gspread.WorksheetNotFound:
+        # Cria a planilha de pedidos se não existir (apenas para segurança)
+        sheet_pedidos = spreadsheet.add_worksheet(title="Pedidos", rows="100", cols="20")
+        headers = [
+            "ID", "Data/Hora", "Nome Cliente", "CPF", "Telefone Cliente", "Email",
+            "Itens Pedido", "Total Pedido", "Observacoes", "Tipo Pagamento",
+            "ID Transacao", "Status", "Aprovado por", "Valor Total Agrupado", "Entregue"
+        ]
+        sheet_pedidos.append_row(headers)
+
+    # Planilha de Configurações
+    try:
+        sheet_config = spreadsheet.worksheet("Configuracoes")
+    except gspread.WorksheetNotFound:
+        sheet_config = spreadsheet.add_worksheet(title="Configuracoes", rows="10", cols="4")
+        sheet_config.append_row(["data_evento", "prazo_data", "prazo_hora", "nome_amigavel"])
+
+    return sheet_pedidos, sheet_config
+
+client = connect_and_authorize()
+sheet, config_sheet = get_sheets(client)
+
+
+# --- Constantes e Configurações Globais ---
 
 CARDAPIO = {
     "opcoes_principais": {
@@ -39,6 +71,29 @@ DATAS_DISPONIVEIS = {
     "Sábado (02/08/2025)": "2025-08-02",
     "Domingo (03/08/2025)": "2025-08-03"
 }
+
+# --- Funções Utilitárias ---
+
+@st.cache_data(ttl=60) # Cache de 1 minuto para os prazos
+def get_deadlines():
+    """Busca e processa os prazos da planilha de configurações."""
+    records = config_sheet.get_all_records()
+    deadlines = {}
+    for record in records:
+        try:
+            deadline_str = f"{record['prazo_data']} {record['prazo_hora']}"
+            # O formato do gspread pode ser 'DD/MM/YYYY' ou 'YYYY-MM-DD'
+            # Vamos tentar ambos
+            try:
+                deadline_dt = datetime.strptime(deadline_str, '%d/%m/%Y %H:%M:%S')
+            except ValueError:
+                 deadline_dt = datetime.strptime(deadline_str, '%Y-%m-%d %H:%M:%S')
+
+            deadlines[record['data_evento']] = deadline_dt
+        except (ValueError, KeyError):
+            # Ignora linhas com formato inválido ou chaves faltando
+            continue
+    return deadlines
 
 def autenticar_admin():
     st.subheader("🔐 Login de Administrador")
@@ -85,35 +140,18 @@ def notificar_cliente(pedido_id, nome_cliente, telefone_cliente, data_pedido, it
     
     return link_whatsapp
 
-def extrair_data_do_datetime(data_hora_str):
-    """Extrai a data de uma string de data/hora"""
-    try:
-        if ' ' in str(data_hora_str):
-            data_parte = str(data_hora_str).split(' ')[0]
-        else:
-            data_parte = str(data_hora_str)
-        
-        return pd.to_datetime(data_parte).date()
-    except:
-        return None
-    
+# --- Página de Pedidos (Usuário) ---
+
 def pagina_pedidos():
     st.title("🍲 Agende seu Pedido de Quentinha")
-
-    # <<< ALTERAÇÃO INSERIDA: Adiciona a observação sobre o almoço
     st.info("💡 **Observação:** Todos os pedidos de quentinhas referem-se ao **almoço**.")
-    # <<< ALTERAÇÃO FINALIZADA
 
     if 'pedido_finalizado' not in st.session_state:
         st.session_state.pedido_finalizado = False
 
     if st.session_state.pedido_finalizado:
-        st.success(
-            "Pedido(s) registrado(s) com sucesso!"
-            "\n\nVocê receberá uma confirmação via WhatsApp após aprovação."
-        )
+        st.success("Pedido(s) registrado(s) com sucesso!\n\nVocê receberá uma confirmação via WhatsApp após aprovação.")
         st.balloons()
-        
         st.markdown("---")
         st.subheader("⚠️ Próximo Passo para Aprovar seu Pedido")
 
@@ -128,20 +166,19 @@ def pagina_pedidos():
                 "**Instituição:** Banco do Brasil"
             )
         elif ultimo_pagamento == "Dinheiro":
-            st.warning(
-                "**LEMBRETE IMPORTANTE (DINHEIRO):**\n\n"
-                "Para que seu pedido seja APROVADO, dirija-se ao caixa do evento para efetuar o pagamento."
-            )
+            st.warning("**LEMBRETE IMPORTANTE (DINHEIRO):**\n\nPara que seu pedido seja APROVADO, dirija-se ao caixa do evento para efetuar o pagamento.")
         
         if st.button("➕ Fazer um Novo Pedido"):
             st.session_state.pedido_finalizado = False
-            if 'carrinho' in st.session_state:
-                del st.session_state.carrinho
-            if 'ultimo_pagamento' in st.session_state:
-                del st.session_state.ultimo_pagamento
+            if 'carrinho' in st.session_state: del st.session_state.carrinho
+            if 'ultimo_pagamento' in st.session_state: del st.session_state.ultimo_pagamento
             st.rerun()
         return
 
+    # --- Lógica de Prazos ---
+    deadlines = get_deadlines()
+    now = datetime.now()
+    
     DATAS_EXIBICAO = {}
     for nome_original, valor_data in DATAS_DISPONIVEIS.items():
         data_obj = datetime.strptime(valor_data, '%Y-%m-%d')
@@ -154,19 +191,32 @@ def pagina_pedidos():
         st.session_state.carrinho = {data_valor: {opcao: 0 for opcao in CARDAPIO["opcoes_principais"]} for data_valor in DATAS_EXIBICAO.values()}
 
     st.subheader("1. Para quais dias você quer agendar?")
-    escolhas_datas = {
-        valor_data: st.radio(
-            f"Pedido para **{nome_data_formatado}**:",
-            ["Sem Pedido", "Quero Pedir"],
-            key=f"choice_{valor_data}",
-            horizontal=True
-        )
-        for nome_data_formatado, valor_data in DATAS_EXIBICAO.items()
-    }
-    datas_para_pedir = [data for data, escolha in escolhas_datas.items() if escolha == "Quero Pedir"]
+    
+    escolhas_datas = {}
+    datas_para_pedir = []
+
+    for nome_data_formatado, valor_data in DATAS_EXIBICAO.items():
+        deadline = deadlines.get(valor_data)
+        
+        if deadline and now > deadline:
+            st.error(f"**Pedidos para {nome_data_formatado} estão encerrados.**")
+        else:
+            if deadline:
+                st.info(f"Pedidos para {nome_data_formatado} se encerram em {deadline.strftime('%d/%m/%Y às %H:%M')}.")
+            else:
+                 st.warning(f"O prazo para {nome_data_formatado} ainda não foi definido pelo administrador.")
+
+            escolha = st.radio(
+                f"Pedido para **{nome_data_formatado}**:",
+                ["Sem Pedido", "Quero Pedir"],
+                key=f"choice_{valor_data}",
+                horizontal=True
+            )
+            if escolha == "Quero Pedir":
+                datas_para_pedir.append(valor_data)
 
     if not datas_para_pedir:
-        st.info("Selecione 'Quero Pedir' em uma das datas para montar sua quentinha.")
+        st.info("Selecione 'Quero Pedir' em uma das datas disponíveis para montar sua quentinha.")
         return
 
     grand_total = 0
@@ -193,10 +243,7 @@ def pagina_pedidos():
                 total_dia += quantidade * CARDAPIO["opcoes_principais"][opcao]
                 itens_dia_obj.append({"nome": opcao, "qtd": quantidade})
 
-        st.markdown(
-            f"<p style='text-align: right; font-weight: bold;'>Subtotal para {nome_amigavel_data}: R$ {total_dia:.2f}</p>",
-            unsafe_allow_html=True
-        )
+        st.markdown(f"<p style='text-align: right; font-weight: bold;'>Subtotal para {nome_amigavel_data}: R$ {total_dia:.2f}</p>", unsafe_allow_html=True)
         grand_total += total_dia
         if total_dia > 0:
             pedidos_finais[data_pedido] = {"itens_obj": itens_dia_obj, "total": total_dia}
@@ -208,11 +255,7 @@ def pagina_pedidos():
         
         tipo_pagamento = st.selectbox("Forma de Pagamento:", ["Pix", "Dinheiro"])
         if tipo_pagamento == "Pix":
-            st.info(
-                "🔑 **Chave PIX:** `86988282470`\n\n"
-                "👤 **Lauriano Costa Viana - Banco do Brasil**\n\n"
-                "📨 Após finalizar o pedido, envie o seu nome completo e o comprovante para 86-98828-2470 via WhatsApp."
-            )
+            st.info("🔑 **Chave PIX:** `86988282470`\n\n👤 **Lauriano Costa Viana - Banco do Brasil**\n\n📨 Após finalizar o pedido, envie o seu nome completo e o comprovante para 86-98828-2470 via WhatsApp.")
         else:
             st.warning("Após finalizar o pedido, dirija-se ao caixa para realizar o pagamento e aprovar seu pedido.")
 
@@ -223,24 +266,16 @@ def pagina_pedidos():
             submitted = st.form_submit_button("✔ Finalizar Pedido")
 
             if submitted:
-                # Remove caracteres não numéricos para a validação
                 numeros_telefone = "".join(filter(str.isdigit, telefone_cliente))
-
-                # 1. Verifica se os campos obrigatórios estão preenchidos
                 if not nome_cliente or not telefone_cliente:
                     st.warning("Por favor, preencha seu Nome Completo e Celular.")
-                
-                # 2. Valida se o telefone tem EXATAMENTE 11 dígitos
                 elif len(numeros_telefone) != 11:
                     st.warning(f"O número '{telefone_cliente}' parece inválido. Por favor, insira um celular com DDD (11 dígitos). Ex: 86999998888")
-
-                # 3. Se tudo estiver correto, processa o pedido
                 else:
                     with st.spinner('Registrando seu pedido, por favor aguarde...'):
                         for data_pedido, detalhes in pedidos_finais.items():
                             id_por_data = f"{data_pedido.replace('-', '')}-{uuid.uuid4().hex[:6].upper()}"
                             itens_fmt = ", ".join([f"[{item['qtd']}x] {item['nome']}" for item in detalhes["itens_obj"]])
-                            # Usa o número de telefone já limpo para salvar na planilha
                             new_order_data = [
                                 id_por_data, f"{data_pedido} {datetime.now().strftime('%H:%M:%S')}",
                                 nome_cliente, "", numeros_telefone, "",
@@ -254,210 +289,248 @@ def pagina_pedidos():
                     st.session_state.pedido_finalizado = True
                     st.rerun()
 
+# --- Página de Administração ---
+
 def pagina_admin():
     if not st.session_state.get("autenticado"):
         autenticar_admin()
         return
 
-    tab1, tab2 = st.tabs(["Gerenciar Pedidos", "Relatórios"])
+    tab1, tab2, tab3 = st.tabs(["Gerenciar Pedidos", "Relatórios", "Prazos e Configurações"])
 
+    # Carrega dados para as abas 1 e 2
     all_data = sheet.get_all_records()
     if not all_data:
-        with tab1:
-            st.title("👑 Gerenciamento de Pedidos Pendentes")
-            st.info("Nenhum pedido para gerenciar.")
-        with tab2:
-            st.title("📈 Relatórios e Entregas")
-            st.info("Nenhum dado para gerar relatórios.")
-        return
-
-    df = pd.DataFrame(all_data)
-    df['Data/Hora'] = pd.to_datetime(df['Data/Hora'], errors='coerce')
-
+        df = pd.DataFrame()
+    else:
+        df = pd.DataFrame(all_data)
+        df['Data/Hora'] = pd.to_datetime(df['Data/Hora'], errors='coerce')
+    
+    # --- Aba 1: Gerenciar Pedidos ---
     with tab1:
         st.title("👑 Gerenciamento de Pedidos Pendentes")
         
         if st.button("🔄 Atualizar Pedidos"): 
             st.rerun()
 
-        st.subheader("🔍 Buscar Pedidos Pendentes")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            busca_id = st.text_input("Buscar por ID do Pedido")
-        with col2:
-            busca_nome = st.text_input("Buscar por Nome do Cliente")
-        with col3:
-            busca_telefone = st.text_input("Buscar por Telefone")
-
-        if 'Status' not in df.columns:
-            st.error("A coluna 'Status' não foi encontrada na sua planilha. Verifique os cabeçalhos.")
-            return
-
-        df_pendentes = df[df['Status'] == 'Pendente'].copy()
-
-        if busca_id:
-            df_pendentes = df_pendentes[df_pendentes['ID'].astype(str).str.contains(busca_id, case=False, na=False)]
-        if busca_nome:
-            df_pendentes = df_pendentes[df_pendentes['Nome Cliente'].str.contains(busca_nome, case=False, na=False)]
-        if busca_telefone:
-            # Garante que a busca por telefone também funcione com números ou strings
-            df_pendentes = df_pendentes[df_pendentes['Telefone Cliente'].astype(str).str.contains(busca_telefone, case=False, na=False)]
-
-        if df_pendentes.empty:
-            st.info("✅ Nenhum pedido pendente encontrado com os critérios de busca.")
+        if df.empty or 'Status' not in df.columns:
+            st.info("Nenhum pedido para gerenciar.")
         else:
-            st.markdown(f"**Pedidos pendentes encontrados:** {len(df_pendentes)}")
-            for _, row in df_pendentes.iterrows():
-                with st.expander(f"Pedido #{row['ID']} - {row['Nome Cliente']} - R$ {row['Total Pedido']}"):
-                    data_formatada = row['Data/Hora'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(row['Data/Hora']) else "Data inválida"
-                    st.write(f"**Data/Hora:** {data_formatada}")
-                    st.write(f"**Itens:** {row['Itens Pedido']}")
-                    st.write(f"**Telefone:** {row['Telefone Cliente']}")
-                    st.write(f"**Pagamento:** {row['Tipo Pagamento']}")
-                    st.write(f"**Observações:** {row['Observacoes'] or 'Nenhuma'}")
-                    
-                    st.markdown("---")
-                    
-                    col_btn1, col_btn2 = st.columns(2)
+            st.subheader("🔍 Buscar Pedidos Pendentes")
+            col1, col2, col3 = st.columns(3)
+            with col1: busca_id = st.text_input("Buscar por ID do Pedido")
+            with col2: busca_nome = st.text_input("Buscar por Nome do Cliente")
+            with col3: busca_telefone = st.text_input("Buscar por Telefone")
 
-                    with col_btn1:
-                        if st.button("Gerar Notificação (WhatsApp)", key=f"notify_{row['ID']}"):
-                            st.session_state[f"show_notify_{row['ID']}"] = True
+            df_pendentes = df[df['Status'] == 'Pendente'].copy()
 
-                    with col_btn2:
-                        if st.button("Aprovar Pedido e Remover", key=f"approve_{row['ID']}", type="primary"):
-                            cell = sheet.find(str(row['ID']))
-                            if cell:
-                                sheet.update_cell(cell.row, 12, "Aprovado")
-                                st.success(f"Pedido #{row['ID']} aprovado! A lista será atualizada.")
-                                
-                                if f"show_notify_{row['ID']}" in st.session_state:
-                                    del st.session_state[f"show_notify_{row['ID']}"]
+            if busca_id: df_pendentes = df_pendentes[df_pendentes['ID'].astype(str).str.contains(busca_id, case=False, na=False)]
+            if busca_nome: df_pendentes = df_pendentes[df_pendentes['Nome Cliente'].str.contains(busca_nome, case=False, na=False)]
+            if busca_telefone: df_pendentes = df_pendentes[df_pendentes['Telefone Cliente'].astype(str).str.contains(busca_telefone, case=False, na=False)]
 
-                                st.rerun()
-                            else:
-                                st.error(f"Não foi possível encontrar o pedido #{row['ID']} na planilha para aprovação.")
-                    
-                    if st.session_state.get(f"show_notify_{row['ID']}", False):
-                        with st.container(border=True):
-                            notificar_cliente(
-                                pedido_id=row['ID'],
-                                nome_cliente=row['Nome Cliente'],
-                                telefone_cliente=row['Telefone Cliente'],
-                                data_pedido=row['Data/Hora'],
-                                itens_pedido=row['Itens Pedido']
-                            )
-                            if st.button("Ocultar Notificação", key=f"hide_{row['ID']}"):
-                                del st.session_state[f"show_notify_{row['ID']}"]
-                                st.rerun()
-
-    with tab2:
-        st.title("📈 Relatórios e Entregas")
-        data_relatorio = st.date_input("Selecione a data do pedido:", value=datetime.now(), format="YYYY-MM-DD")
-        
-        st.info("Por padrão, a data de hoje é selecionada. Altere para a data que deseja consultar (ex: 02/08/2025 ou 03/08/2025).")
-
-        df['Data'] = df['Data/Hora'].dt.date
-        df.dropna(subset=['Data'], inplace=True)
-        df['Total Pedido'] = pd.to_numeric(df['Total Pedido'], errors='coerce').fillna(0)
-
-        df_aprovados_do_dia = df[(df['Data'] == data_relatorio) & (df['Status'] == 'Aprovado')]
-
-        if 'Entregue' in df_aprovados_do_dia.columns:
-            df_para_entrega = df_aprovados_do_dia[df_aprovados_do_dia['Entregue'] != 'Sim'].copy()
-        else:
-            df_para_entrega = df_aprovados_do_dia.copy()
-
-        st.subheader("🔍 Buscar Pedidos para Entrega")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            busca_id_entrega = st.text_input("Buscar por ID do Pedido", key="busca_id_entrega")
-        with col2:
-            busca_nome_entrega = st.text_input("Buscar por Nome do Cliente", key="busca_nome_entrega")
-        with col3:
-            busca_item_entrega = st.text_input("Buscar por Item do Pedido", key="busca_item_entrega")
-
-        if busca_id_entrega:
-            df_para_entrega = df_para_entrega[df_para_entrega['ID'].astype(str).str.contains(busca_id_entrega, case=False, na=False)]
-        if busca_nome_entrega:
-            df_para_entrega = df_para_entrega[df_para_entrega['Nome Cliente'].str.contains(busca_nome_entrega, case=False, na=False)]
-        if busca_item_entrega:
-            df_para_entrega = df_para_entrega[df_para_entrega['Itens Pedido'].str.contains(busca_item_entrega, case=False, na=False)]
-
-        st.markdown("---")
-        st.subheader(f"📋 Lista de Entregas Pendentes ({len(df_para_entrega)})")
-
-        if df_para_entrega.empty:
-            st.success("🎉 Todos os pedidos para esta data foram entregues!")
-        else:
-            opcoes_ordenacao = st.multiselect(
-                "Ordenar entregas por:",
-                options=["Nome Cliente", "Data/Hora"],
-                default=["Nome Cliente"],
-                key="ordenacao_entregas"
-            )
-
-            if opcoes_ordenacao:
-                df_para_entrega = df_para_entrega.sort_values(by=opcoes_ordenacao)
-
-            for _, row in df_para_entrega.iterrows():
-                with st.expander(f"Pedido #{row['ID']} - {row['Nome Cliente']}"):
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
+            if df_pendentes.empty:
+                st.info("✅ Nenhum pedido pendente encontrado com os critérios de busca.")
+            else:
+                st.markdown(f"**Pedidos pendentes encontrados:** {len(df_pendentes)}")
+                for _, row in df_pendentes.iterrows():
+                    with st.expander(f"Pedido #{row['ID']} - {row['Nome Cliente']} - R$ {row['Total Pedido']}"):
                         data_formatada = row['Data/Hora'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(row['Data/Hora']) else "Data inválida"
                         st.write(f"**Data/Hora:** {data_formatada}")
                         st.write(f"**Itens:** {row['Itens Pedido']}")
                         st.write(f"**Telefone:** {row['Telefone Cliente']}")
-                    
-                    with col2:
-                        if st.button(f"Marcar como Entregue", key=f"entregue_{row['ID']}"):
-                            cell = sheet.find(str(row['ID']))
-                            if cell:
-                                sheet.update_cell(cell.row, 15, "Sim") 
-                                st.success(f"Pedido #{row['ID']} marcado como entregue!")
-                                st.rerun()
-                            else:
-                                st.error(f"Não foi possível encontrar o pedido #{row['ID']} na planilha para entrega.")
-        
-        st.markdown("---")
-        st.subheader("💰 Resumo Financeiro do Dia (Todos os Pedidos Aprovados)")
+                        st.write(f"**Pagamento:** {row['Tipo Pagamento']}")
+                        st.write(f"**Observações:** {row['Observacoes'] or 'Nenhuma'}")
+                        
+                        st.markdown("---")
+                        col_btn1, col_btn2 = st.columns(2)
 
-        if df_aprovados_do_dia.empty:
-            st.info("Nenhum pedido aprovado para a data selecionada para gerar relatórios.")
+                        with col_btn1:
+                            if st.button("Gerar Notificação (WhatsApp)", key=f"notify_{row['ID']}"):
+                                st.session_state[f"show_notify_{row['ID']}"] = True
+                        with col_btn2:
+                            if st.button("Aprovar Pedido e Remover", key=f"approve_{row['ID']}", type="primary"):
+                                cell = sheet.find(str(row['ID']))
+                                if cell:
+                                    sheet.update_cell(cell.row, 12, "Aprovado")
+                                    st.success(f"Pedido #{row['ID']} aprovado! A lista será atualizada.")
+                                    if f"show_notify_{row['ID']}" in st.session_state: del st.session_state[f"show_notify_{row['ID']}"]
+                                    st.rerun()
+                                else:
+                                    st.error(f"Não foi possível encontrar o pedido #{row['ID']} na planilha para aprovação.")
+                        
+                        if st.session_state.get(f"show_notify_{row['ID']}", False):
+                            with st.container(border=True):
+                                notificar_cliente(
+                                    pedido_id=row['ID'], nome_cliente=row['Nome Cliente'],
+                                    telefone_cliente=row['Telefone Cliente'], data_pedido=row['Data/Hora'],
+                                    itens_pedido=row['Itens Pedido']
+                                )
+                                if st.button("Ocultar Notificação", key=f"hide_{row['ID']}"):
+                                    del st.session_state[f"show_notify_{row['ID']}"]
+                                    st.rerun()
+
+    # --- Aba 2: Relatórios ---
+    with tab2:
+        st.title("📈 Relatórios e Entregas")
+        if df.empty:
+            st.info("Nenhum dado para gerar relatórios.")
         else:
-            st.write("#### Resumo por Item Vendido")
-            contagem = {}
-            for _, row in df_aprovados_do_dia.iterrows():
-                itens = str(row['Itens Pedido']).split(',')
-                for item in itens:
-                    item = item.strip()
-                    if '] ' in item:
+            data_relatorio = st.date_input("Selecione a data do pedido:", value=datetime.now(), format="YYYY-MM-DD")
+            st.info("Altere para a data que deseja consultar (ex: 02/08/2025 ou 03/08/2025).")
+
+            df['Data'] = df['Data/Hora'].dt.date
+            df.dropna(subset=['Data'], inplace=True)
+            df['Total Pedido'] = pd.to_numeric(df['Total Pedido'], errors='coerce').fillna(0)
+
+            df_aprovados_do_dia = df[(df['Data'] == data_relatorio) & (df['Status'] == 'Aprovado')]
+
+            if 'Entregue' in df_aprovados_do_dia.columns:
+                df_para_entrega = df_aprovados_do_dia[df_aprovados_do_dia['Entregue'] != 'Sim'].copy()
+            else:
+                df_para_entrega = df_aprovados_do_dia.copy()
+
+            st.subheader("🔍 Buscar Pedidos para Entrega")
+            col1, col2, col3 = st.columns(3)
+            with col1: busca_id_entrega = st.text_input("Buscar por ID", key="busca_id_entrega")
+            with col2: busca_nome_entrega = st.text_input("Buscar por Nome", key="busca_nome_entrega")
+            with col3: busca_item_entrega = st.text_input("Buscar por Item", key="busca_item_entrega")
+
+            if busca_id_entrega: df_para_entrega = df_para_entrega[df_para_entrega['ID'].astype(str).str.contains(busca_id_entrega, case=False, na=False)]
+            if busca_nome_entrega: df_para_entrega = df_para_entrega[df_para_entrega['Nome Cliente'].str.contains(busca_nome_entrega, case=False, na=False)]
+            if busca_item_entrega: df_para_entrega = df_para_entrega[df_para_entrega['Itens Pedido'].str.contains(busca_item_entrega, case=False, na=False)]
+
+            st.markdown("---")
+            st.subheader(f"📋 Lista de Entregas Pendentes ({len(df_para_entrega)})")
+
+            if df_para_entrega.empty:
+                st.success("🎉 Todos os pedidos para esta data foram entregues!")
+            else:
+                opcoes_ordenacao = st.multiselect("Ordenar por:", options=["Nome Cliente", "Data/Hora"], default=["Nome Cliente"])
+                if opcoes_ordenacao: df_para_entrega = df_para_entrega.sort_values(by=opcoes_ordenacao)
+
+                for _, row in df_para_entrega.iterrows():
+                    with st.expander(f"Pedido #{row['ID']} - {row['Nome Cliente']}"):
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            data_formatada = row['Data/Hora'].strftime('%d/%m/%Y %H:%M:%S') if pd.notna(row['Data/Hora']) else "N/A"
+                            st.write(f"**Data/Hora:** {data_formatada}")
+                            st.write(f"**Itens:** {row['Itens Pedido']}")
+                            st.write(f"**Telefone:** {row['Telefone Cliente']}")
+                        with col2:
+                            if st.button(f"Marcar como Entregue", key=f"entregue_{row['ID']}"):
+                                cell = sheet.find(str(row['ID']))
+                                if cell:
+                                    sheet.update_cell(cell.row, 15, "Sim") 
+                                    st.success(f"Pedido #{row['ID']} marcado como entregue!")
+                                    st.rerun()
+                                else:
+                                    st.error(f"Não foi possível encontrar o pedido #{row['ID']} na planilha.")
+            
+            st.markdown("---")
+            st.subheader("💰 Resumo Financeiro do Dia (Pedidos Aprovados)")
+
+            if df_aprovados_do_dia.empty:
+                st.info("Nenhum pedido aprovado para a data selecionada.")
+            else:
+                st.write("#### Resumo por Item Vendido")
+                contagem = {}
+                for _, row in df_aprovados_do_dia.iterrows():
+                    itens = str(row['Itens Pedido']).split(',')
+                    for item in itens:
+                        item = item.strip()
+                        if '] ' in item:
+                            try:
+                                qtd_str, nome_item = item.split('] ')
+                                qtd = int(qtd_str.replace('[','').replace('x','').strip())
+                                contagem[nome_item] = contagem.get(nome_item, 0) + qtd
+                            except ValueError:
+                                st.warning(f"Não foi possível processar o item: '{item}' do pedido #{row['ID']}")
+                for k, v in contagem.items(): st.write(f"- {k}: {v} unidades")
+
+                st.write("#### Fechamento de Caixa")
+                total_vendido = df_aprovados_do_dia["Total Pedido"].sum()
+                st.markdown(f"**Total Arrecadado ({data_relatorio.strftime('%d/%m/%Y')}): R$ {total_vendido:.2f}**")
+                
+                valores_por_pagamento = df_aprovados_do_dia.groupby("Tipo Pagamento")["Total Pedido"].sum()
+                st.write("##### Totais por forma de pagamento:")
+                for metodo, valor in valores_por_pagamento.items(): st.write(f"- {metodo}: R$ {valor:.2f}")
+
+    # --- Aba 3: Prazos e Configurações ---
+    with tab3:
+        st.title("⚙️ Prazos e Configurações")
+        st.subheader("Definir Data e Hora Limite para Pedidos")
+        st.warning("Atenção: Após o horário definido para uma data, os usuários não poderão mais fazer pedidos para aquele dia.")
+
+        # Carrega as configurações atuais
+        config_records = config_sheet.get_all_records()
+        configs = {rec['data_evento']: rec for rec in config_records}
+
+        with st.form("deadlines_form"):
+            new_configs = {}
+            for nome_amigavel, data_evento in DATAS_DISPONIVEIS.items():
+                st.markdown("---")
+                st.markdown(f"#### Prazo para **{nome_amigavel}**")
+                
+                # Valores padrão
+                default_date = datetime.strptime(data_evento, '%Y-%m-%d').date()
+                default_time = time(10, 0) # 10:00 como padrão
+
+                # Carrega valores salvos, se existirem
+                if data_evento in configs:
+                    try:
+                        saved_date_str = configs[data_evento]['prazo_data']
+                        saved_time_str = configs[data_evento]['prazo_hora']
+                        # Tenta formatos diferentes que o gspreads pode retornar
                         try:
-                            qtd_str, nome_item = item.split('] ')
-                            qtd = int(qtd_str.replace('[','').replace('x','').strip())
-                            contagem[nome_item] = contagem.get(nome_item, 0) + qtd
+                            default_date = datetime.strptime(saved_date_str, '%d/%m/%Y').date()
                         except ValueError:
-                            st.warning(f"Não foi possível processar o item: '{item}' do pedido #{row['ID']}")
-            
-            for k, v in contagem.items():
-                st.write(f"- {k}: {v} unidades")
+                            default_date = datetime.strptime(saved_date_str, '%Y-%m-%d').date()
+                        default_time = datetime.strptime(saved_time_str, '%H:%M:%S').time()
+                    except (ValueError, KeyError):
+                        st.error(f"Formato de data/hora salvo para {nome_amigavel} é inválido. Usando valores padrão.")
 
-            st.write("#### Fechamento de Caixa")
-            total_vendido = df_aprovados_do_dia["Total Pedido"].sum()
-            valores_por_pagamento = df_aprovados_do_dia.groupby("Tipo Pagamento")["Total Pedido"].sum()
-            
-            st.markdown(f"**Total Arrecadado (Aprovados em {data_relatorio.strftime('%d/%m/%Y')}): R$ {total_vendido:.2f}**")
+                # Inputs para o admin
+                col1, col2 = st.columns(2)
+                with col1:
+                    prazo_data = st.date_input("Data limite", value=default_date, key=f"date_{data_evento}", format="DD/MM/YYYY")
+                with col2:
+                    prazo_hora = st.time_input("Hora limite", value=default_time, key=f"time_{data_evento}")
 
-            st.write("##### Totais por forma de pagamento:")
-            for metodo, valor in valores_por_pagamento.items():
-                st.write(f"- {metodo}: R$ {valor:.2f}")
+                new_configs[data_evento] = {
+                    "prazo_data": prazo_data,
+                    "prazo_hora": prazo_hora,
+                    "nome_amigavel": nome_amigavel
+                }
 
-            st.write("##### Número de pedidos por forma deagemnto:")
-            total_por_pagamento = df_aprovados_do_dia["Tipo Pagamento"].value_counts()
-            for metodo, count in total_por_pagamento.items():
-                st.write(f"- {metodo}: {count} pedido(s)")
+            submitted = st.form_submit_button("💾 Salvar Todos os Prazos", type="primary")
+            if submitted:
+                with st.spinner("Salvando configurações..."):
+                    for data_evento, config_data in new_configs.items():
+                        # Procura se a configuração para esta data já existe
+                        cell = config_sheet.find(data_evento)
+                        
+                        prazo_data_str = config_data['prazo_data'].strftime('%Y-%m-%d')
+                        prazo_hora_str = config_data['prazo_hora'].strftime('%H:%M:%S')
 
-# Configuração do menu principal
+                        if cell:
+                            # Atualiza a linha existente
+                            row_index = cell.row
+                            config_sheet.update_cell(row_index, 2, prazo_data_str)
+                            config_sheet.update_cell(row_index, 3, prazo_hora_str)
+                        else:
+                            # Adiciona uma nova linha se não existir
+                            config_sheet.append_row([
+                                data_evento,
+                                prazo_data_str,
+                                prazo_hora_str,
+                                config_data['nome_amigavel']
+                            ])
+                st.success("Prazos salvos com sucesso!")
+                # Limpa o cache para forçar a releitura dos prazos
+                st.cache_data.clear()
+                st.rerun()
+
+# --- Configuração do menu principal ---
 menu = st.sidebar.radio("Escolha a página:", ["Fazer Pedido", "Painel de Administração"])
 if menu == "Fazer Pedido":
     pagina_pedidos()
