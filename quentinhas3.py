@@ -254,10 +254,19 @@ def pagina_pedidos():
         st.markdown("---")
         
         tipo_pagamento = st.selectbox("Forma de Pagamento:", ["Pix", "Dinheiro"])
+
+        # --- ALTERAÇÃO INSERIDA AQUI ---
+        st.warning(
+            "**Atenção:** Para continuar, preencha seu **Nome e Telefone** abaixo e clique em **Finalizar Pedido**.\n\n"
+            "Seu pedido será registrado com o status **PENDENTE** e aguardará a confirmação do pagamento.\n\n"
+            "⚠️ **Somente os pedidos com status APROVADO serão preparados.**"
+        )
+        # --- FIM DA ALTERAÇÃO ---
+
         if tipo_pagamento == "Pix":
-            st.info("🔑 **Chave PIX:** `86988282470`\n\n👤 **Lauriano Costa Viana - Banco do Brasil**\n\n📨 Após finalizar o pedido, envie o seu nome completo e o comprovante para 86-98828-2470 via WhatsApp.")
+            st.info("🔑 **Chave PIX:** `86988282470`\n\n👤 **Lauriano Costa Viana - Banco do Brasil**\n\n📨 Após finalizar, envie o seu nome completo e o comprovante para 86-98828-2470 via WhatsApp para ter seu pedido APROVADO.")
         else:
-            st.warning("Após finalizar o pedido, dirija-se ao caixa para realizar o pagamento e aprovar seu pedido.")
+            st.info("💵 Após finalizar, dirija-se ao caixa do evento para realizar o pagamento e ter seu pedido APROVADO.")
 
         with st.form("final_form"):
             nome_cliente = st.text_input("Seu Nome Completo*")
