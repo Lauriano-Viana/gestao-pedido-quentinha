@@ -6,7 +6,7 @@ from datetime import datetime, date, time
 import uuid
 import urllib.parse
 import locale
-
+import pytz # <-- ADICIONADO: Biblioteca para lidar com fusos horários
 
 # Configurações iniciais do Streamlit
 st.set_page_config(page_title="Pedido Quentinhas - Congresso RCC/PI", page_icon="🍲", layout="wide")
@@ -15,6 +15,23 @@ try:
     locale.setlocale(locale.LC_TIME, 'pt_BR.UTF-8')
 except locale.Error:
     locale.setlocale(locale.LC_TIME, '')
+
+# --- CONSTANTES E CONFIGURAÇÕES GLOBAIS ---
+
+# ADICIONADO: Define o fuso horário correto (Brasil)
+FUSO_HORARIO_LOCAL = pytz.timezone("America/Sao_Paulo")
+
+CARDAPIO = {
+    "opcoes_principais": {
+        "Isca (carne, frango e calabresa)": 20.00,
+        "Frango assado e Toscana": 20.00,
+        "Assado de panela e Toscana": 20.00
+    }
+}
+DATAS_DISPONIVEIS = {
+    "Sábado (02/08/2025)": "2025-08-02",
+    "Domingo (03/08/2025)": "2025-08-03"
+}
 
 # --- Funções de Conexão com Google Sheets ---
 
@@ -36,7 +53,6 @@ def get_sheets(_client_gs):
     try:
         sheet_pedidos = spreadsheet.worksheet("Pedidos")
     except gspread.WorksheetNotFound:
-        # Cria a planilha de pedidos se não existir (apenas para segurança)
         sheet_pedidos = spreadsheet.add_worksheet(title="Pedidos", rows="100", cols="20")
         headers = [
             "ID", "Data/Hora", "Nome Cliente", "CPF", "Telefone Cliente", "Email",
@@ -57,21 +73,6 @@ def get_sheets(_client_gs):
 client = connect_and_authorize()
 sheet, config_sheet = get_sheets(client)
 
-
-# --- Constantes e Configurações Globais ---
-
-CARDAPIO = {
-    "opcoes_principais": {
-        "Isca (carne, frango e calabresa)": 20.00,
-        "Frango assado e Toscana": 20.00,
-        "Assado de panela e Toscana": 20.00
-    }
-}
-DATAS_DISPONIVEIS = {
-    "Sábado (02/08/2025)": "2025-08-02",
-    "Domingo (03/08/2025)": "2025-08-03"
-}
-
 # --- Funções Utilitárias ---
 
 @st.cache_data(ttl=60) # Cache de 1 minuto para os prazos
@@ -82,16 +83,20 @@ def get_deadlines():
     for record in records:
         try:
             deadline_str = f"{record['prazo_data']} {record['prazo_hora']}"
-            # O formato do gspread pode ser 'DD/MM/YYYY' ou 'YYYY-MM-DD'
-            # Vamos tentar ambos
+            deadline_dt_naive = None # Variável para o datetime "ingênuo" (sem fuso)
+            
+            # Tenta múltiplos formatos de data que o Sheets pode retornar
             try:
-                deadline_dt = datetime.strptime(deadline_str, '%d/%m/%Y %H:%M:%S')
+                deadline_dt_naive = datetime.strptime(deadline_str, '%d/%m/%Y %H:%M:%S')
             except ValueError:
-                 deadline_dt = datetime.strptime(deadline_str, '%Y-%m-%d %H:%M:%S')
+                 deadline_dt_naive = datetime.strptime(deadline_str, '%Y-%m-%d %H:%M:%S')
 
-            deadlines[record['data_evento']] = deadline_dt
+            # CORRIGIDO: Converte o horário lido (que assumimos ser local) para um horário com fuso definido
+            if deadline_dt_naive:
+                deadline_dt_aware = FUSO_HORARIO_LOCAL.localize(deadline_dt_naive)
+                deadlines[record['data_evento']] = deadline_dt_aware
+
         except (ValueError, KeyError):
-            # Ignora linhas com formato inválido ou chaves faltando
             continue
     return deadlines
 
@@ -177,7 +182,8 @@ def pagina_pedidos():
 
     # --- Lógica de Prazos ---
     deadlines = get_deadlines()
-    now = datetime.now()
+    # CORRIGIDO: Pega a hora atual com o fuso horário correto
+    now = datetime.now(FUSO_HORARIO_LOCAL)
     
     DATAS_EXIBICAO = {}
     for nome_original, valor_data in DATAS_DISPONIVEIS.items():
@@ -198,10 +204,12 @@ def pagina_pedidos():
     for nome_data_formatado, valor_data in DATAS_EXIBICAO.items():
         deadline = deadlines.get(valor_data)
         
+        # A comparação agora é feita entre dois horários "cientes" do fuso
         if deadline and now > deadline:
             st.error(f"**Pedidos para {nome_data_formatado} estão encerrados.**")
         else:
             if deadline:
+                # Exibe o prazo no formato local correto
                 st.info(f"Pedidos para {nome_data_formatado} se encerram em {deadline.strftime('%d/%m/%Y às %H:%M')}.")
             else:
                  st.warning(f"O prazo para {nome_data_formatado} ainda não foi definido pelo administrador.")
@@ -255,13 +263,11 @@ def pagina_pedidos():
         
         tipo_pagamento = st.selectbox("Forma de Pagamento:", ["Pix", "Dinheiro"])
 
-        # --- ALTERAÇÃO INSERIDA AQUI ---
         st.warning(
             "**Atenção:** Para continuar, preencha seu **Nome e Telefone** abaixo e clique em **Finalizar Pedido**.\n\n"
             "Seu pedido será registrado com o status **PENDENTE** e aguardará a confirmação do pagamento.\n\n"
             "⚠️ **Somente os pedidos com status APROVADO serão preparados.**"
         )
-        # --- FIM DA ALTERAÇÃO ---
 
         if tipo_pagamento == "Pix":
             st.info("🔑 **Chave PIX:** `86988282470`\n\n👤 **Lauriano Costa Viana - Banco do Brasil**\n\n📨 Após finalizar, envie o seu nome completo e o comprovante para 86-98828-2470 via WhatsApp para ter seu pedido APROVADO.")
@@ -282,11 +288,13 @@ def pagina_pedidos():
                     st.warning(f"O número '{telefone_cliente}' parece inválido. Por favor, insira um celular com DDD (11 dígitos). Ex: 86999998888")
                 else:
                     with st.spinner('Registrando seu pedido, por favor aguarde...'):
+                        # CORRIGIDO: Pega a hora atual com fuso para registrar na planilha
+                        hora_atual_local = datetime.now(FUSO_HORARIO_LOCAL).strftime('%H:%M:%S')
                         for data_pedido, detalhes in pedidos_finais.items():
                             id_por_data = f"{data_pedido.replace('-', '')}-{uuid.uuid4().hex[:6].upper()}"
                             itens_fmt = ", ".join([f"[{item['qtd']}x] {item['nome']}" for item in detalhes["itens_obj"]])
                             new_order_data = [
-                                id_por_data, f"{data_pedido} {datetime.now().strftime('%H:%M:%S')}",
+                                id_por_data, f"{data_pedido} {hora_atual_local}",
                                 nome_cliente, "", numeros_telefone, "",
                                 itens_fmt, f"{detalhes['total']:.2f}",
                                 observacoes, tipo_pagamento, "", "Pendente", "",
@@ -384,7 +392,8 @@ def pagina_admin():
         if df.empty:
             st.info("Nenhum dado para gerar relatórios.")
         else:
-            data_relatorio = st.date_input("Selecione a data do pedido:", value=datetime.now(), format="YYYY-MM-DD")
+            # Pega a data atual no fuso horário local como padrão
+            data_relatorio = st.date_input("Selecione a data do pedido:", value=datetime.now(FUSO_HORARIO_LOCAL), format="YYYY-MM-DD")
             st.info("Altere para a data que deseja consultar (ex: 02/08/2025 ou 03/08/2025).")
 
             df['Data'] = df['Data/Hora'].dt.date
@@ -470,7 +479,6 @@ def pagina_admin():
         st.subheader("Definir Data e Hora Limite para Pedidos")
         st.warning("Atenção: Após o horário definido para uma data, os usuários não poderão mais fazer pedidos para aquele dia.")
 
-        # Carrega as configurações atuais
         config_records = config_sheet.get_all_records()
         configs = {rec['data_evento']: rec for rec in config_records}
 
@@ -480,16 +488,13 @@ def pagina_admin():
                 st.markdown("---")
                 st.markdown(f"#### Prazo para **{nome_amigavel}**")
                 
-                # Valores padrão
                 default_date = datetime.strptime(data_evento, '%Y-%m-%d').date()
-                default_time = time(10, 0) # 10:00 como padrão
+                default_time = time(10, 0)
 
-                # Carrega valores salvos, se existirem
                 if data_evento in configs:
                     try:
                         saved_date_str = configs[data_evento]['prazo_data']
                         saved_time_str = configs[data_evento]['prazo_hora']
-                        # Tenta formatos diferentes que o gspreads pode retornar
                         try:
                             default_date = datetime.strptime(saved_date_str, '%d/%m/%Y').date()
                         except ValueError:
@@ -498,7 +503,6 @@ def pagina_admin():
                     except (ValueError, KeyError):
                         st.error(f"Formato de data/hora salvo para {nome_amigavel} é inválido. Usando valores padrão.")
 
-                # Inputs para o admin
                 col1, col2 = st.columns(2)
                 with col1:
                     prazo_data = st.date_input("Data limite", value=default_date, key=f"date_{data_evento}", format="DD/MM/YYYY")
@@ -515,19 +519,16 @@ def pagina_admin():
             if submitted:
                 with st.spinner("Salvando configurações..."):
                     for data_evento, config_data in new_configs.items():
-                        # Procura se a configuração para esta data já existe
                         cell = config_sheet.find(data_evento)
                         
                         prazo_data_str = config_data['prazo_data'].strftime('%Y-%m-%d')
                         prazo_hora_str = config_data['prazo_hora'].strftime('%H:%M:%S')
 
                         if cell:
-                            # Atualiza a linha existente
                             row_index = cell.row
                             config_sheet.update_cell(row_index, 2, prazo_data_str)
                             config_sheet.update_cell(row_index, 3, prazo_hora_str)
                         else:
-                            # Adiciona uma nova linha se não existir
                             config_sheet.append_row([
                                 data_evento,
                                 prazo_data_str,
@@ -535,7 +536,6 @@ def pagina_admin():
                                 config_data['nome_amigavel']
                             ])
                 st.success("Prazos salvos com sucesso!")
-                # Limpa o cache para forçar a releitura dos prazos
                 st.cache_data.clear()
                 st.rerun()
 
